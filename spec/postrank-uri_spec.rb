@@ -135,6 +135,7 @@ describe PostRank::URI do
     context "tumblr" do
       it "should strip slug" do
         c('http://test.tumblr.com/post/4533459403/some-text').should == 'http://test.tumblr.com/post/4533459403/'
+        c('http://tumblr.com/xjl2evo3hh').should == 'http://tumblr.com/xjl2evo3hh'
       end
     end
 
@@ -189,20 +190,20 @@ describe PostRank::URI do
       PostRank::URI.hash(uri, opts)
     end
 
-    it "should compute MD5 hash of the normalized URI" do
+    it "should compute the MD5 hash without cleaning the URI" do
       hash = '55fae8910d312b7878a3201ed653b881'
 
-      h('http://EverBurning.Com/feed/post/1').should == hash
-      h('Everburning.com/feed/post/1').should == hash
-      h('everburning.com/feed/post/1').should == hash
-      h('everburning.com/feed/post/1/').should == hash
+      h('http://everburning.com/feed/post/1').should == hash
+      h('everburning.com/feed/post/1').should_not == hash
     end
 
-    it "should not clean the URI if requested" do
+    it "should normalize the URI if requested and compute MD5 hash" do
       hash = '55fae8910d312b7878a3201ed653b881'
 
-      h('http://everburning.com/feed/post/1', :clean => false).should == hash
-      h('everburning.com/feed/post/1', :clean => false).should_not == hash
+      h('http://EverBurning.Com/feed/post/1', :clean => true).should == hash
+      h('Everburning.com/feed/post/1', :clean => true).should == hash
+      h('everburning.com/feed/post/1', :clean => true).should == hash
+      h('everburning.com/feed/post/1/', :clean => true).should == hash
     end
   end
 
@@ -225,6 +226,10 @@ describe PostRank::URI do
       e('test http://twitter.com/#!/igrigorik').should include('http://twitter.com/igrigorik')
     end
 
+    it "should extract mobile twitter links with hashbangs" do
+      e('test http://mobile.twitter.com/#!/_mm6').should include('http://mobile.twitter.com/_mm6')
+    end
+
     it "should handle a URL that comes after text without a space" do
       e("text:http://spn.tw/tfnLT").should include("http://spn.tw/tfnLT")
       e("text;http://spn.tw/tfnLT").should include("http://spn.tw/tfnLT")
@@ -240,6 +245,11 @@ describe PostRank::URI do
       u = e('abc.com abc.co')
       u.should include('http://abc.com/')
       u.should include('http://abc.co/')
+    end
+
+    it "should pickup urls inside tags" do
+      u = e("<a href='http://bit.ly/3fds3'>abc.com</a>")
+      u.should include('http://abc.com/')
     end
 
     context "multibyte characters" do
@@ -281,30 +291,60 @@ describe PostRank::URI do
       end
     end
 
-    context 'domain extraction' do
-      url_list = {"http://alex.pages.example.com" => "example.com",
-                  "alex.pages.example.com" => "example.com",
-                  "http://example.com/2011/04/01/blah" => "example.com",
-                  "http://example.com" => "example.com",
-                  "example.com" => "example.com",
-                  "ExampLe.com" => "example.com",
-                  "ExampLe.com:3000" => "example.com",
-                  "http://alex.pages.example.COM" => "example.com",
-                  "http://www.example.ag.it/2011/04/01/blah" => "example.ag.it",
-                  "ftp://www.example.com/2011/04/01/blah" => nil,
-                  "http://com" => nil,
-                  "http://alex.pages.examplecom" => nil,
-                  "example" => nil,
-                  "http://127.0.0.1" => nil,
-                  "localhost" => nil
-                  }
+    context "domain extraction" do
+      url_list = {
+        "http://alex.pages.example.com" => "example.com",
+        "alex.pages.example.com" => "example.com",
+        "http://example.com/2011/04/01/blah" => "example.com",
+        "http://example.com" => "example.com",
+        "example.com" => "example.com",
+        "ExampLe.com" => "example.com",
+        "ExampLe.com:3000" => "example.com",
+        "http://alex.pages.example.COM" => "example.com",
+        "http://www.example.ag.it/2011/04/01/blah" => "example.ag.it",
+        "ftp://www.example.com/2011/04/01/blah" => 'example.com',
+        "http://com" => nil,
+        "http://alex.pages.examplecom" => nil,
+        "example" => nil,
+        "http://127.0.0.1" => nil,
+        "localhost" => nil,
+        "hello-there.com/you" => "hello-there.com"
+      }
 
-       url_list.each_pair do |url, expected_result|
-         it "should extract #{expected_result.inspect} from #{url}" do
-            u = PostRank::URI.clean(url, :raw => true)
-            u.domain.should == expected_result
-         end
-       end
+      url_list.each_pair do |url, expected_result|
+        it "should extract #{expected_result.inspect} from #{url}" do
+          u = PostRank::URI.clean(url, :raw => true)
+          u.domain.should == expected_result
+        end
+      end
+    end
+  end
+
+  context "parse" do
+    it 'should not fail on large host-part look-alikes' do
+      PostRank::URI.parse('a'*64+'.ca').host.should == nil
+    end
+
+    it 'should not pancake javascript scheme URIs' do
+      PostRank::URI.parse('javascript:void(0);').scheme.should == 'javascript'
+    end
+
+    it 'should not pancake mailto scheme URIs' do
+      PostRank::URI.parse('mailto:void(0);').scheme.should == 'mailto'
+    end
+
+    it 'should not pancake xmpp scheme URIs' do
+      PostRank::URI.parse('xmpp:void(0);').scheme.should == 'xmpp'
+    end
+  end
+
+  context 'valid?' do
+    it 'marks www.test.c as invalid' do
+      PostRank::URI.valid?('http://www.test.c').should be_false
+    end
+
+    it 'marks www.test.com as valid' do
+      PostRank::URI.valid?('http://www.test.com').should be_true
     end
   end
 end

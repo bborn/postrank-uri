@@ -18,6 +18,22 @@ module Addressable
       dom = dp.public_suffix
       dom = dp.domain.downcase + "." + dom unless dp.domain.empty?
     end
+
+    def normalized_query
+      @normalized_query ||= (begin
+        if self.query && self.query.strip != ''
+          (self.query.strip.split("&", -1).map do |pair|
+            Addressable::URI.normalize_component(
+              pair,
+              Addressable::URI::CharacterClasses::QUERY.sub("\\&", "")
+            )
+          end).join("&")
+        else
+          nil
+        end
+      end)
+    end
+
   end
 end
 
@@ -33,7 +49,7 @@ module PostRank
     URIREGEX = {}
     URIREGEX[:protocol] = /https?:\/\//i
     URIREGEX[:valid_preceding_chars] = /(?:|\.|[^-\/"':!=A-Z0-9_@＠]|^|\:)/i
-    URIREGEX[:valid_domain] = /(?:[^[:punct:]\s][\.-](?=[^[:punct:]\s])|[^[:punct:]\s]){1,}\.[a-z]{2,}(?::[0-9]+)?/i
+    URIREGEX[:valid_domain] = /\b(?:[a-z0-9-]{1,63}\.){1,}[a-z]{2,63}(?::[0-9]+)?/i
     URIREGEX[:valid_general_url_path_chars] = /[a-z0-9!\*';:=\+\,\$\/%#\[\]\-_~]/i
 
     # Allow URL paths to contain balanced parens
@@ -102,11 +118,9 @@ module PostRank
       urls = []
       Nokogiri.HTML(text).search('a').each do |a|
         begin
-          url = clean(a.attr('href'), :raw => true)
-          if url.host.empty?
-            next if host.nil?
-            url.host = host
-          end
+          url = clean(a.attr('href'), :raw => true, :host => host)
+
+          next unless url.absolute?
 
           urls.push [url.to_s, a.text]
         rescue
@@ -129,16 +143,16 @@ module PostRank
     end
 
     def clean(uri, opts = {})
-      uri = normalize(c18n(unescape(uri)))
+      uri = normalize(c18n(unescape(uri), opts))
       opts[:raw] ? uri : uri.to_s
     end
 
     def hash(uri, opts = {})
-      Digest::MD5.hexdigest(opts[:clean] == false ? uri : clean(uri))
+      Digest::MD5.hexdigest(opts[:clean] == true ? clean(uri) : uri)
     end
 
-    def normalize(uri)
-      u = parse(uri)
+    def normalize(uri, opts = {})
+      u = parse(uri, opts)
       u.path = u.path.squeeze('/')
       u.path = u.path.chomp('/') if u.path.size != 1
       u.query = nil if u.query && u.query.empty?
@@ -146,22 +160,22 @@ module PostRank
       u
     end
 
-    def c18n(uri)
-      u = parse(uri)
+    def c18n(uri, opts = {})
+      u = parse(uri, opts)
       u = embedded(u)
 
-      if q = u.query_values(:notation => :flat_array)
+      if q = u.query_values(Array)
         q.delete_if { |k,v| C18N[:global].include?(k) }
         q.delete_if { |k,v| C18N[:hosts].find {|r,p| u.host =~ r && p.include?(k) } }
       end
       u.query_values = q
 
-      if u.host == 'twitter.com' && u.fragment && u.fragment.match(/^!(.*)/)
+      if u.host =~ /^(mobile\.)?twitter\.com$/ && u.fragment && u.fragment.match(/^!(.*)/)
         u.fragment = nil
         u.path = $1
       end
 
-      if u.host =~ /tumblr\.com$/
+      if u.host =~ /tumblr\.com$/ && u.path =~ /\/post\/\d+\//
         u.path = u.path.gsub(/[^\/]+$/, '')
       end
 
@@ -181,12 +195,39 @@ module PostRank
       uri
     end
 
-    def parse(uri)
+    def parse(uri, opts = {})
       return uri if uri.is_a? Addressable::URI
 
-      uri = uri.index(URIREGEX[:protocol]) == 0 ? uri : "http://#{uri}"
-      Addressable::URI.parse(uri).normalize
+      uri = Addressable::URI.parse(uri)
+
+      if !uri.host && uri.scheme !~ /^javascript|mailto|xmpp$/
+        if uri.scheme
+          # With no host and scheme yes, the parser exploded
+          return parse("http://#{uri}", opts)
+        end
+
+        if opts[:host]
+          uri.host = opts[:host]
+        else
+          parts = uri.path.to_s.split(/[\/:]/)
+          if parts.first =~ URIREGEX[:valid_domain]
+            host = parts.shift
+            uri.path = '/' + parts.join('/')
+            uri.host = host
+          end
+        end
+      end
+
+      uri.scheme = 'http' if uri.host && !uri.scheme
+      uri.normalize!
     end
 
+    def valid?(uri)
+      Domainatrix.parse(uri)
+      true
+    rescue
+      false
+    end
   end
 end
+
